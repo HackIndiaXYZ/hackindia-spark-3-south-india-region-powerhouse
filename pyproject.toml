@@ -34,6 +34,7 @@ dependencies = [
     "sentence-transformers>=5.1.1",
     "serpapi>=0.1.5",
     "streamlit>=1.52.2",
+    "tavily-python>=0.7.17",
     "torch>=2.9.0",
     "transformers>=4.57.1",
     "wikipedia-api>=0.8.1",

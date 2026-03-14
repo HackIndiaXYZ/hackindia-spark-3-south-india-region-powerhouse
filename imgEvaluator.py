@@ -6,7 +6,13 @@ import torch.nn.functional as F
 from PIL import Image
 from typing import List, Union, Optional
 from PIL import Image  # Ensure this import is at the top if not already present
-import google.generativeai as genai
+try:
+    import google.genai as genai
+    NEW_GENAI = True
+except ImportError:
+    # Fallback to old package if new one not installed
+    import google.generativeai as genai
+    NEW_GENAI = False
 # Install required package for OpenCLIP
 # pip install open_clip_torch
 
@@ -210,11 +216,6 @@ def geminiLLMInterface(handwritten_image_path: str, reference_image_path: str) -
     if not GOOGLE_GEMINI_API_KEY:
         raise ValueError("❌ GOOGLE_GEMINI_API_KEY not found. Please set it in your .env file or environment variables.")
 
-    # Configure Gemini API once during initialization
-    genai.configure(api_key=GOOGLE_GEMINI_API_KEY)
-
-    # Load a multimodal model (handles both text + image)
-    model = genai.GenerativeModel("gemini-2.5-flash")  # Stable, current version
     static_prompt = """
     You are an expert evaluator for handwritten or manually drawn exam answers across any subject.
 
@@ -245,10 +246,45 @@ def geminiLLMInterface(handwritten_image_path: str, reference_image_path: str) -
         handwritten_image = Image.open(handwritten_image_path)
         reference_image = Image.open(reference_image_path)
 
-        contents = [static_prompt, handwritten_image, reference_image]
-        response = model.generate_content(contents)
-
-        return response.text.strip()
+        if NEW_GENAI:
+            # New google.genai package
+            client = genai.Client(api_key=GOOGLE_GEMINI_API_KEY)
+            
+            # Convert images to bytes
+            import io
+            
+            # Convert handwritten image
+            hw_img_byte_arr = io.BytesIO()
+            handwritten_image.save(hw_img_byte_arr, format='PNG')
+            hw_img_bytes = hw_img_byte_arr.getvalue()
+            
+            # Convert reference image
+            ref_img_byte_arr = io.BytesIO()
+            reference_image.save(ref_img_byte_arr, format='PNG')
+            ref_img_bytes = ref_img_byte_arr.getvalue()
+            
+            response = client.models.generate_content(
+                model="gemini-2.0-flash-exp",
+                contents=[{
+                    "role": "user", 
+                    "parts": [
+                        {"text": static_prompt},
+                        {"inline_data": {"mime_type": "image/png", "data": hw_img_bytes}},
+                        {"inline_data": {"mime_type": "image/png", "data": ref_img_bytes}}
+                    ]
+                }]
+            )
+            
+            return response.candidates[0].content.parts[0].text.strip()
+        else:
+            # Old google.generativeai package
+            genai.configure(api_key=GOOGLE_GEMINI_API_KEY)
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            
+            contents = [static_prompt, handwritten_image, reference_image]
+            response = model.generate_content(contents)
+            
+            return response.text.strip()
 
     except Exception as e:
         print(f"❌ Error generating response: {e}")
@@ -267,11 +303,6 @@ def geminiDiagramInference(diagram_image_path: str) -> str:
     if not GOOGLE_GEMINI_API_KEY:
         raise ValueError("❌ GOOGLE_GEMINI_API_KEY not found. Please set it in your .env file or environment variables.")
 
-    # Configure Gemini API once during initialization
-    genai.configure(api_key=GOOGLE_GEMINI_API_KEY)
-
-    # Load a multimodal model (handles both text + image)
-    model = genai.GenerativeModel("gemini-2.5-flash")  # Stable, current version
     static_prompt = """
     You are an expert diagram analyzer for educational content, such as exam answers or technical illustrations.
 
@@ -296,10 +327,37 @@ def geminiDiagramInference(diagram_image_path: str) -> str:
     try:
         diagram_image = Image.open(diagram_image_path)
 
-        contents = [static_prompt, diagram_image]
-        response = model.generate_content(contents)
-
-        return response.text.strip()
+        if NEW_GENAI:
+            # New google.genai package
+            client = genai.Client(api_key=GOOGLE_GEMINI_API_KEY)
+            
+            # Convert image to bytes
+            import io
+            img_byte_arr = io.BytesIO()
+            diagram_image.save(img_byte_arr, format='PNG')
+            img_bytes = img_byte_arr.getvalue()
+            
+            response = client.models.generate_content(
+                model="gemini-2.0-flash-exp",
+                contents=[{
+                    "role": "user", 
+                    "parts": [
+                        {"text": static_prompt},
+                        {"inline_data": {"mime_type": "image/png", "data": img_bytes}}
+                    ]
+                }]
+            )
+            
+            return response.candidates[0].content.parts[0].text.strip()
+        else:
+            # Old google.generativeai package
+            genai.configure(api_key=GOOGLE_GEMINI_API_KEY)
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            
+            contents = [static_prompt, diagram_image]
+            response = model.generate_content(contents)
+            
+            return response.text.strip()
 
     except Exception as e:
         print(f"❌ Error generating response: {e}")

@@ -18,15 +18,16 @@ import unicodedata
 import fitz  # pip install PyMuPDF
 
 # Assuming ClipSearchService is imported from the appropriate module; adjust the import path as needed
-from ragSystems.imageRag import \
-    ClipSearchService  # Replace 'your_module' with the actual module path containing ClipSearchService
+# from ragSystems.imageRag import \
+#     ClipSearchService  # Disabled to prevent crashes
 
 
 class documentProcessor:
     def __init__(self, collection_name):
         self.taskHandler = taskProcessor()
         self.ragProcessor = ragProcessor(collection_name=collection_name)
-        self.image_service = ClipSearchService(collection_name=str(collection_name) + "_img")
+        # self.image_service = ClipSearchService(collection_name=str(collection_name) + "_img")  # Disabled
+        self.image_service = None  # Disabled to prevent crashes
         self.BASE_IMAGE_DIR = r"D:\scoriX_agent\data\referenceImages"
         os.makedirs(self.BASE_IMAGE_DIR, exist_ok=True)
 
@@ -424,8 +425,11 @@ class documentProcessor:
             print(f"✅ Processed and stored {len(chunks)} chunks in RAG collection.")
 
         if image_paths:
-            self.image_service.index_images(image_paths, metadatas)
-            print(f"✅ Processed and stored {len(image_paths)} images in image collection.")
+            if self.image_service is not None:
+                self.image_service.index_images(image_paths, metadatas)
+                print(f"✅ Processed and stored {len(image_paths)} images in image collection.")
+            else:
+                print("⚠️ Image service disabled - skipping image indexing.")
         else:
             print("No images found to process.")
 

@@ -12,13 +12,13 @@ class taskProcessor:
 
     def questionPaperHandler(self , imagePath):
         prompt = self.prompts.questionPaperHandelingPrompt()
-        response = self.Interfaces.geminiLLMInterface(prompt=prompt, imagePath=imagePath)
+        response = self.Interfaces.VLMInterface(prompt=prompt, imagePath=imagePath)
         response = extract_json_from_llm_response(response)
 
         return response
 
     def tableSummaryProcessor(self,content):
-        prompt = self.prompts.tableSummaryPrompt()
+        prompt = self.prompts.tableSummaryPrompt(content)
         response = self.Interfaces.nvidiaResponse(prompt=prompt)
         response = extract_clean_answer(
             response,
@@ -92,7 +92,9 @@ class dataProcessor():
     
     def questionEnhancer(self,content,reference):
         prompt = self.prompts.questionEnhancerPrompt(content,reference=reference    )
-        response = self.interface.nvidiaResponse(prompt=prompt,model="mistralai/mixtral-8x7b-instruct-v0.1")
+        response = self.interface.nvidiaResponse(prompt=prompt,model="nvidia/llama-3.1-nemotron-ultra-253b-v1")
+        print("**"*30)
+        print("getting in")
         return extract_json_from_llm_response(response)
 
     def extractTopics(self, content,element):
@@ -102,7 +104,7 @@ class dataProcessor():
 
     def questionEvaluatorMainLoop(self,content,questions,verdict,memory):
         prompt = self.prompts.questionPaperEvaluatorLoopPrompt(content,questions,verdict,memory)
-        response = self.interface.nvidiaResponse(prompt=prompt,model="moonshotai/kimi-k2-thinking")
+        response = self.interface.nvidiaResponse(prompt=prompt,model="nvidia/llama-3.1-nemotron-ultra-253b-v1")
         return extract_json_from_llm_response(response)
     
     def ragQueryGenerator(self,content,prompt):
@@ -129,6 +131,34 @@ class dataProcessor():
         """Validates and cleans questions to remove metadata and formatting issues"""
         prompt = self.prompts.questionValidatorPrompt(questions)
         response = self.interface.nvidiaResponse(prompt=prompt, model="mistralai/mixtral-8x7b-instruct-v0.1")
+        return extract_json_from_llm_response(response)
+
+    def chatPlanner(self , input, content):
+        prompt = self.prompts.chatPlannerPrompt(input,content)
+        response = self.interface.nvidiaResponse(prompt=prompt,model="nvidia/llama-3.1-nemotron-ultra-253b-v1")
+        print(response)
+        return extract_json_from_llm_response(response)
+    def currentQPSummarizer(self, questions):
+        prompt = self.prompts.currectQPSummarizer(questions)
+        response = self.interface.nvidiaResponse(prompt=prompt, model="mistralai/mixtral-8x7b-instruct-v0.1")
+        
+        return extract_json_from_llm_response(response)
+
+    def chatAgent(self,questionsSummary,memory,input):
+        prompt = self.prompts.chatAgentPrompt(questionsSummary,memory,input)
+        response = self.interface.nvidiaResponse(prompt=prompt,model="nvidia/llama-3.1-nemotron-ultra-253b-v1")
+        
+        return extract_json_from_llm_response(response)
+    
+    def chatAgentOutputValidator(self, agentOutputs):
+        """
+        Validates, deduplicates, and cleans agent outputs from multiple COs.
+        Returns a cleaned list of validated outputs.
+        """
+        prompt = self.prompts.chatAgentOutputValidatorPrompt(agentOutputs)
+        response = self.interface.nvidiaResponse(prompt=prompt, model="nvidia/llama-3.1-nemotron-ultra-253b-v1")
+        print("Validator Response:")
+        print(response)
         return extract_json_from_llm_response(response)
 
     
@@ -219,6 +249,8 @@ def extract_json_from_llm_response(text: str):
             import ast
             return ast.literal_eval(json_str)
         except (ValueError, SyntaxError) as e:
+            print("Error parsing JSON:", e)
+            print("moving to fall back")
             interface = LLMInterface()
             content = json_str    
             reformationPrompt = f"""You will be given text that is intended to be valid JSON but may be malformed, truncated, or contain extra characters due to token limits.
@@ -239,6 +271,11 @@ def extract_json_from_llm_response(text: str):
             If the input is not JSON-like at all, return:
             {{}}
             """
+            print("\n" + "="*80)
+            print("FALLBACK REFORMATION PROMPT:")
+            print("="*80)
+            print(reformationPrompt)
+            print("="*80 + "\n")
             response = interface.nvidiaResponse(prompt=reformationPrompt, model="mistralai/mixtral-8x7b-instruct-v0.1")
             return extract_clean_answer(response)
              

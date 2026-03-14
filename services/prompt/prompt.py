@@ -237,6 +237,7 @@ class agentPrompts:
                 NOW, here is the page text to process:
                 {content}
                 """
+        return prompt
 
     def answerFullFillPrompt(self,question,partial_answer,marks):
         prompt = f"""
@@ -534,7 +535,6 @@ class questionGeneratorPrompt():
             - Ensure academic correctness
             - Maintain consistent mapping logic across all COs
             """
-
         return SYSTEM_PROMPT
 
     def webSearchSelectorPrompt(self,subject,topic):
@@ -548,24 +548,41 @@ class questionGeneratorPrompt():
             - topic: string
             input = {topic}
 
-            AVAILABLE TOOLS:
-            - W3SchoolsScraper (coding syntax, basic examples)
-            - GeeksForGeeksScraper (algorithms, data structures, CS theory)
+            AVAILABLE TOOLS (in priority order):
+            
+            **HIGHEST PRIORITY - Indian Educational Content (12th grade):**
+            - NCERTScraper (NCERT official content - TOP priority for Indian syllabus)
+            - CBSEScraper (CBSE official syllabus, sample papers, guidelines)
+            - DIKSHAScraper (Government of India learning platform)
+            - NROERScraper (National Repository of Open Educational Resources)
+            
+            **HIGH PRIORITY - Official Documentation (for technical topics):**
+            - OfficialDocsScraper (Python, PyTorch, TensorFlow, MDN, Kubernetes docs)
+            - WikipediaScraper (definitions, history, fundamental concepts)
+            
+            **STANDARD PRIORITY - General Educational Content:**
             - NPTELScraper (engineering academics, exam-oriented theory)
             - MITOCWScraper (advanced university theory, math, physics)
             - OpenStaxScraper (textbook-style science & humanities)
+            - GeeksForGeeksScraper (algorithms, data structures, CS theory)
+            - W3SchoolsScraper (coding syntax, basic examples)
             - UniversityEDUScraper (.edu lecture notes, PDFs, fallback)
 
             TASK:
             - Choose the most suitable tool(s) for the topic
             - Generate ONE optimized search query per tool
             - Use multiple tools only if clearly useful
+            - For 12th grade Indian curriculum: ALWAYS prioritize NCERT, CBSE, DIKSHA, NROER
+            - For technical/programming topics: prioritize OfficialDocs, then GeeksForGeeks/W3Schools
+            - For theoretical concepts: prioritize Wikipedia, NPTEL, MITOCW
 
             RULES:
             - Do NOT invent tools
             - Do NOT explain
             - Keep queries concise and academic
-            - give higher priority to given topic
+            - Give higher priority to given topic
+            - For Indian 12th grade content, use NCERT/CBSE first
+            - For programming, use official docs first
 
             OUTPUT:
             Return ONLY valid JSON in this exact format:
@@ -621,53 +638,44 @@ class questionGeneratorPrompt():
         """
         return SYSTEM_PROMPT
     
-    def questionEnhancerPrompt(self,content,reference):
+    def questionEnhancerPrompt(self, content, reference):
         SYSTEM_PROMPT = f"""
         You are an expert educational assessment designer.
 
-        You will be given:
-        1. An original question (may be MCQ or non-MCQ).
-        2. Retrieved content from a vector database (may be empty, partial, or relevant).
-        reference question with its topics: {reference}
-        retrieved content: {content}
-        Your task:
-        - ALWAYS keep the original question.
-        - Analyze the retrieved content carefully.
+        INPUTS:
+        - reference question with its topics: {reference}
+        - retrieved content: {content}
 
-        BEHAVIOR RULES:
-        1. If the retrieved content introduces new concepts, perspectives, constraints, examples, or real-world contexts:
-        → Generate additional NEW and ORIGINAL questions that meaningfully use that content.
-        2. If the retrieved content adds no new value, is irrelevant, or belongs to a different domain (e.g., biology content for an AI question):
-        → Return the original question EXACTLY AS IS. Do not rewrite, paraphrase, or modify it.
-        3. Do NOT exclude or replace the original question.
-        4. Do NOT copy sentences directly from the retrieved content.
-        5. Avoid redundancy across generated questions.
-        6. Ensure questions encourage higher-order thinking (Bloom’s taxonomy).
-        7. SAFETY CHECK: If the retrieved content leads to questions about a completely different topic (e.g., photosynthesis instead of AI), IGNORE the content completely.
+        TASK:
+        Generate an exam-ready question list.
 
-        MCQ-SPECIFIC RULES:
-        - If a question is an MCQ:
-        - Include 4 multiple-choice options (A, B, C, D).
-        - Embed the options directly within the same list element as the question.
-        - Ensure only ONE option is clearly correct.
-        - Do NOT explicitly mention which option is correct.
+        STRICT RULES:
+        1) You MUST output ONLY a JSON array (list) of strings.
+        2) Output must start with '[' and end with ']'.
+        3) DO NOT include any other text such as:
+          - explanations
+          - markdown
+          - code fences like ```json
+          - headings
+          - numbering
+          - bullet points
+          - newline formatting outside JSON
+        4) Every element in the JSON array must be a single question string.
+        5) If a question is MCQ, include 4 options A, B, C, D inside the SAME string.
 
-        IMPORTANT OUTPUT RULE:
-        Return ONLY a valid JSON list of strings in the following format:
-        ["q1", "q2", "q3", ...]
-        
-        - questions must be exam ready dont add any topics and subtopics just write the question
-        - Ensure all double quotes inside the strings are properly escaped (e.g., \"text\").
-        - The FIRST element must ALWAYS correspond to the original question (unchanged or refined).
-        - If any question is an MCQ, its options must be included inside the same string.
-        - Do NOT add explanations, headings, numbering, bullet points, or new lines.
+        OUTPUT FORMAT EXAMPLE (follow exactly):
+        ["Question 1 ...", "Question 2 ...", "Question 3 ..."]
 
-        WAIT FOR INPUT:
-        - Original Question
-        - Retrieved Content
+        IMPORTANT:
+        - DO NOT add topics/subtopics.
+        - DO NOT add answers.
+        - DO NOT add reasoning.
+        - DO NOT include extra keys like {{ "questions": [...] }}.
 
+        Return ONLY the JSON list. No additional characters.
         """
         return SYSTEM_PROMPT
+
 
     def questionPaperEvaluatorLoopPrompt(self,content,generatedQuestions,verdict,memory):
         SYSTEM_PROMPT = f"""
@@ -998,5 +1006,328 @@ class questionGeneratorPrompt():
         - Target length: 40–70 words
         """
         return SYSTEM_PROMPT
+    def chatPlannerPrompt(self,input,content):
+        SYSTEM_PROMPT = f"""
+Analyze user input → Return JSON
 
+INPUT:
+- User: {input}
+- Current COs: {content.get('content', [])}
+- Past Chat: {content.get('chat_history', [])}
 
+TASK:
+Decide if user wants to MODIFY question paper or just CHAT/ASK.
+
+OUTPUT (2 cases):
+
+**CASE 1: Direct Answer (chat/questions)**
+If user is:
+- Asking questions ("why", "what", "how", "explain", "show")
+- Greeting/thanking
+- Requesting information (not modification)
+
+Return:
+{{
+  "direct": true,
+  "answer": "<your response>"
+}}
+
+**CASE 2: Modification Plan**
+If user wants to CHANGE question paper:
+- Add/create questions
+- Remove/delete questions (if what to delete is not specified, select all COs)
+- Modify/change difficulty/type
+- Replace questions
+
+Return:
+{{
+  "direct": false,
+  "plan": [
+    {{
+      "step": "<action to take>",
+      "co": ["CO1"] or ["CO1", "CO2"] or all COs as list
+    }}
+  ],
+  "answer": "<confirmation message about what will be done, e.g., 'I'll generate 5 MCQ questions for CO1' or 'I'll increase difficulty across all COs'>"
+}}
+
+**CASE 3: Mixed Input (both question AND modification)**
+If user ASKS something AND wants to MODIFY:
+- Answer their question
+- Provide modification plan
+
+Return:
+{{
+  "direct": false,
+  "plan": [
+    {{
+      "step": "<action to take>",
+      "co": ["CO1", "CO2"]
+    }}
+  ],
+  "answer": "<answer to their question + confirmation of planned action>"
+}}
+
+RULES:
+1. "direct": true → conversational response only
+2. "direct": false → actionable plan + confirmation message
+3. "co" must be LIST: ["CO1"], ["CO1", "CO2"], never "all"
+4. Extract CO numbers from current_co
+5. Steps must be DIRECT actions, not analysis
+6. No apologies in answers
+7. Be concise and friendly
+8. Output MUST be valid JSON with specified keys only
+9. ALWAYS include "answer" field in both cases
+10. If mixed input, prioritize modification plan but answer questions too
+
+EXAMPLES:
+
+User: "Add 5 MCQ for CO1"
+→ {{"direct": false, "plan": [{{"step": "Generate 5 MCQ questions", "co": ["CO1"]}}], "answer": "I'll generate 5 MCQ questions for CO1."}}
+
+User: "Why is Q10 in CO2?"
+→ {{"direct": true, "answer": "Q10 aligns with CO2 because it tests the ability to apply programming constructs like loops and conditionals to solve computational problems, which is the core objective of CO2."}}
+
+User: "Make all harder"
+→ {{"direct": false, "plan": [{{"step": "Increase difficulty to apply/analyze level", "co": ["CO1", "CO2", "CO3"]}}], "answer": "I'll increase the difficulty of questions across all COs (CO1, CO2, CO3) to apply/analyze level."}}
+
+User: "How many questions in CO1?"
+→ {{"direct": true, "answer": "CO1 currently has X questions covering programming fundamentals including variables, data types, and control structures."}}
+
+User: "Can you explain CO2 and add 3 more questions for it?"
+→ {{"direct": false, "plan": [{{"step": "Generate 3 questions", "co": ["CO2"]}}], "answer": "CO2 focuses on applying programming constructs like loops, functions, and conditionals to solve computational problems. I'll add 3 more questions for CO2."}}
+
+User: "Delete redundant questions"
+→ {{"direct": false, "plan": [{{"step": "Remove redundant questions", "co": ["CO1", "CO2", "CO3"]}}], "answer": "I'll identify and remove redundant questions across all COs."}}
+
+Return ONLY JSON, no extra text or markdown.
+"""
+        return SYSTEM_PROMPT
+
+    def currectQPSummarizer(self, questions: list[str]) -> str:
+        SYSTEM_PROMPT = f"""
+Classify each question → JSON array. Use question index (1-based) as question_id.
+
+OUTPUT SCHEMA:
+[
+  {{
+    "question_id": "1",
+    "base_concept": "core concept",
+    "topic": "subject area",
+    "bloom_level": "Remember|Understand|Apply|Analyze|Evaluate|Create",
+    "difficulty": "Easy|Medium|Hard",
+    "question_type": "MCQ|Descriptive|Short Answer|Programming|True/False|Fill in the Blank"
+  }}
+]
+
+CLASSIFICATION RULES:
+
+1. Question Types:
+   - MCQ: Has options (A), (B), (C), (D)
+   - Descriptive: Theory/explanation questions
+   - Programming: Code-writing/implementation
+   - Short Answer: Brief response questions
+   - True/False: Binary choice
+   - Fill in the Blank: Completion questions
+
+2. Difficulty:
+   - Easy: "What is", "Define", recall, simple identification
+   - Medium: "Write", "Implement", "Analyze", "Compare", application
+   - Hard: "Design", "Evaluate", "Optimize", synthesis/creation
+
+3. Bloom's Taxonomy (based on question verb):
+   - Remember: Define, List, Recall, Identify
+   - Understand: Explain, Describe, Summarize, Interpret
+   - Apply: Implement, Use, Execute, Solve
+   - Analyze: Compare, Contrast, Examine, Differentiate
+   - Evaluate: Justify, Critique, Assess, Argue
+   - Create: Design, Develop, Construct, Formulate
+
+4. Base Concept: Single specific concept (e.g., "Variables", "Loops", "Inheritance")
+
+5. Topic: Broader category (e.g., "Programming Fundamentals", "OOP", "Data Structures")
+
+QUESTIONS:
+{questions}
+
+Return ONLY the JSON array, no explanation.
+"""
+        return SYSTEM_PROMPT
+    def chatAgentPrompt(self,questionsSummary,memory,input):
+        SYSTEM_PROMPT = f"""
+You are a Question Paper Modification Agent. Process user requests to modify question sets.
+
+INPUT:
+Q_SUMMARY (50+ items): {questionsSummary}
+Schema: {{q_id, base_concept, topic, bloom_level, difficulty, q_type}}
+
+MEMORY: {memory}
+(Past tool calls + outputs)
+
+USER: {input}
+
+TOOLS:
+1. needActualQuestion → Get full question text
+   Return: {{"needActualQuestion": ["q_id1", "q_id2"]}}
+
+2. ragAgent → Search new questions
+   Return: {{"tool": "ragAgent", "searchQuery": "your query"}}
+
+ACTIONS (Final):
+1. ADD → Create new questions (simple concepts only, no RAG needed)
+   {{"action": "ADD", "questions": ["Q1 text", "Q2 text"]}}
+
+2. UPDATE → Modify existing questions
+   {{"action": "UPDATE", "questions": {{"q_id": "updated question text"}}}}
+
+3. REMOVE → Delete questions
+   {{"action": "REMOVE", "questions": ["q_id1", "q_id2"]}}
+
+LOGIC:
+- Check MEMORY first (avoid repeating tool calls)
+- If need full Q text → use needActualQuestion
+- If need new concepts/topics → use ragAgent
+- If simple addition (basic concepts) → ADD directly
+- When done thinking → return final action
+
+CRITICAL RULES:
+1. Return ONLY valid JSON - NO explanations, NO markdown, NO extra text
+2. One response per turn (tool OR action, not both)
+3. Use q_id from Q_SUMMARY
+4. For ADD: write complete questions
+5. For UPDATE: specify q_id + new text
+6. For REMOVE: list q_ids only
+7. DO NOT wrap JSON in markdown code blocks
+8. DO NOT add any text before or after the JSON
+9. The ENTIRE response must be parseable as JSON
+
+EXAMPLES:
+
+User: "Remove easy questions"
+{{"action": "REMOVE", "questions": ["1", "3", "7"]}}
+
+User: "Make Q5 harder"
+{{"needActualQuestion": ["5"]}}
+
+User: "Add 3 questions on loops"
+{{"action": "ADD", "questions": ["Explain the difference between for and while loops.", "Write a program to print numbers 1-10 using a loop.", "What is an infinite loop?"]}}
+
+User: "Find questions about neural networks"
+{{"tool": "ragAgent", "searchQuery": "neural networks deep learning questions"}}
+
+IMPORTANT: Your response must start with {{ and end with }}. Nothing else.
+"""
+        return SYSTEM_PROMPT
+
+    def chatAgentOutputValidatorPrompt(self, agentOutputs):
+        SYSTEM_PROMPT = f"""
+You are a Question Paper Output Validator and Deduplicator.
+
+Your task is to validate, clean, and deduplicate agent outputs from multiple Course Outcomes (COs).
+
+INPUT:
+{agentOutputs}
+
+Format: [
+  {{"co": 0, "output": {{"action": "ADD", "questions": ["Q1", "Q2", ...]}}}},
+  {{"co": 1, "output": {{"action": "UPDATE", "questions": {{"q_id": "updated text", ...}}}}}},
+  {{"co": 2, "output": {{"action": "REMOVE", "questions": ["id1", "id2", ...]}}}},
+  ...
+]
+
+VALIDATION TASKS:
+
+1. **Validate Structure**
+   - Ensure each output has "co" (number) and "output" (dict)
+   - Ensure "output" has "action" (ADD/UPDATE/REMOVE) and "questions"
+   - Remove any malformed entries
+
+2. **Deduplicate Questions**
+   - For ADD actions: Remove duplicate questions across ALL COs
+   - Keep only the first occurrence of each unique question
+   - Case-insensitive comparison
+   - Ignore minor punctuation differences
+
+3. **Clean Question Format**
+   - Remove metadata, tags, prefixes (CO1:, PO2:, Topic:, etc.)
+   - Ensure questions are complete sentences
+   - Standardize MCQ options to (A) (B) (C) (D) format
+   - Remove extra whitespace and newlines
+   - Ensure proper capitalization and punctuation
+
+4. **Validate Question Quality**
+   - Remove empty or very short questions (< 10 characters)
+   - Remove questions that are just topics/keywords
+   - Remove questions with invalid characters or encoding issues
+   - Ensure questions make grammatical sense
+
+5. **Handle Different Actions**
+   - **ADD**: List of question strings
+   - **UPDATE**: Dict of {{"q_id": "question text"}}
+   - **REMOVE**: List of question IDs (strings/numbers)
+
+6. **Anomaly Detection**
+   - Remove questions with excessive repetition
+   - Remove questions that don't align with educational standards
+   - Flag and remove nonsensical or gibberish questions
+
+OUTPUT FORMAT:
+
+Return ONLY a valid JSON list in this exact format:
+
+[
+  {{
+    "co": 0,
+    "action": "ADD",
+    "questions": ["Clean Q1", "Clean Q2", ...]
+  }},
+  {{
+    "co": 1,
+    "action": "UPDATE",
+    "questions": {{"5": "Updated Q5", "12": "Updated Q12"}}
+  }},
+  {{
+    "co": 2,
+    "action": "REMOVE",
+    "questions": ["3", "7", "15"]
+  }}
+]
+
+CRITICAL RULES:
+1. Return ONLY valid JSON - no explanations, no markdown
+2. Preserve CO numbers from input
+3. Deduplicate across ALL COs (global deduplication)
+4. Keep questions in their original CO unless they're duplicates
+5. For duplicates, keep the first occurrence and remove others
+6. Ensure all questions are exam-ready and properly formatted
+7. Do NOT add new questions - only clean and validate existing ones
+8. If an entire CO output is invalid, omit it from the result
+9. Maintain action types (ADD/UPDATE/REMOVE) from input
+
+EXAMPLES:
+
+Input with duplicates:
+[
+  {{"co": 0, "output": {{"action": "ADD", "questions": ["What is a stack?", "Explain arrays"]}}}},
+  {{"co": 1, "output": {{"action": "ADD", "questions": ["What is a stack?", "Define loops"]}}}}
+]
+
+Output (deduplicated):
+[
+  {{"co": 0, "action": "ADD", "questions": ["What is a stack?", "Explain arrays."]}},
+  {{"co": 1, "action": "ADD", "questions": ["Define loops."]}}
+]
+
+Input with formatting issues:
+[
+  {{"co": 0, "output": {{"action": "ADD", "questions": ["CO1: what is java", "Topic: Programming - explain OOP"]}}}}
+]
+
+Output (cleaned):
+[
+  {{"co": 0, "action": "ADD", "questions": ["What is Java?", "Explain OOP."]}}
+]
+
+Return JSON only. No extra text.
+"""
+        return SYSTEM_PROMPT

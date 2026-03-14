@@ -1,0 +1,107 @@
+import re
+from collections import Counter, defaultdict
+from rake_nltk import Rake
+import spacy
+
+# -------------------------------
+# 1. Load NLP model
+# -------------------------------
+nlp = spacy.load("en_core_web_sm")
+
+
+# -------------------------------
+# 2. Clean Tavily text
+# -------------------------------
+def clean_text(text: str) -> str:
+    text = re.sub(r"\n+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\d+\s*\|\s*Page.*", "", text)
+    return text.strip().lower()
+
+
+# -------------------------------
+# 3. Chunk text
+# -------------------------------
+def chunk_text(text, max_words=120):
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), max_words):
+        chunks.append(" ".join(words[i:i + max_words]))
+    return chunks
+
+
+# -------------------------------
+# 4. Extract topics using RAKE
+# -------------------------------
+def extract_topics(chunks, top_k=5):
+    rake = Rake()
+    all_topics = []
+
+    for chunk in chunks:
+        rake.extract_keywords_from_text(chunk)
+        phrases = rake.get_ranked_phrases()[:top_k]
+        all_topics.extend(phrases)
+
+    return all_topics
+
+
+# -------------------------------
+# 5. Extract subtopics using noun phrases
+# -------------------------------
+def extract_subtopics(chunks):
+    noun_phrases = []
+
+    for chunk in chunks:
+        doc = nlp(chunk)
+        noun_phrases.extend([np.text.lower() for np in doc.noun_chunks])
+
+    return noun_phrases
+
+
+# -------------------------------
+# 6. Build Topic → Subtopic map
+# -------------------------------
+def build_topic_hierarchy(topics, subtopics):
+    topic_counter = Counter(topics)
+    subtopic_counter = Counter(subtopics)
+
+    final_topics = defaultdict(list)
+
+    for topic, t_count in topic_counter.items():
+        if t_count >= 2:  # frequency threshold
+            for subtopic, s_count in subtopic_counter.items():
+                if topic in subtopic and s_count >= 2:
+                    final_topics[topic].append(subtopic)
+
+    return final_topics
+
+
+# -------------------------------
+# 7. SAMPLE TEST CASE
+# -------------------------------
+if __name__ == "__main__":
+
+    scraped_text = """
+    Control structures are fundamental concepts in programming.
+    They include conditional statements and loops.
+    A for loop is used when the number of iterations is known.
+    A while loop is useful when the condition is evaluated dynamically.
+    Do-while loops execute at least once.
+    Control structures help in decision making and iteration.
+    """
+
+    print("\n🔹 RAW SCRAPED TEXT:\n", scraped_text)
+
+    cleaned = clean_text(scraped_text)
+    chunks = chunk_text(cleaned)
+
+    topics = extract_topics(chunks)
+    subtopics = extract_subtopics(chunks)
+
+    hierarchy = build_topic_hierarchy(topics, subtopics)
+
+    print("\n✅ EXTRACTED TOPICS & SUBTOPICS:\n")
+    for topic, subs in hierarchy.items():
+        print(f"📌 Topic: {topic}")
+        for s in set(subs):
+            print(f"   └─ {s}")

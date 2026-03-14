@@ -46,20 +46,69 @@ class HybridRagProcessor:
     def search(self, query, metadata_filter: dict = None, top_k: int = 3):
         """
         Search for query with optional metadata filtering.
+        Uses DENSE-ONLY search to avoid sparse vector encoding issues.
         """
-        dense_vec = self.textEmbedder.embed_text(query)[0] # Take the first (and only) vector
-        sparse_vec = self.textEmbedder.get_sparse_embeddings(query)[0]
+        # Validate query (allow 2+ chars for queries like "AI", "ML", "CO", "PO")
+        if not query or not isinstance(query, str) or len(query.strip()) < 2:
+            print(f"⚠️ Warning: Query too short or invalid: '{query}'. Returning empty results.")
+            return []
         
-        results = self.qdrantManager.search_integrated_hybrid(
-            query_dense=dense_vec,
-            query_sparse=sparse_vec,
-            metadata_filter=metadata_filter,
-            top_k=top_k
-        )
-        
-        output = []
-        for r in results.points:
-            output.append(r.payload)
+        try:
+            # Generate dense embedding only
+            dense_vec = self.textEmbedder.embed_text(query)[0]
             
-        return output
+            # Use dense-only search (more reliable)
+            return self._dense_only_search(dense_vec, metadata_filter, top_k)
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Error during search: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return []
 
+    
+    def _dense_only_search(self, dense_vec, metadata_filter: dict = None, top_k: int = 3):
+        """
+        Fallback search using only dense vectors (no sparse/BM25).
+        Uses the search method which properly supports named vectors.
+        """
+        try:
+            from qdrant_client.models import FieldCondition, Filter, MatchValue
+            
+            # Build filter if metadata_filter is provided
+            query_filter = None
+            if metadata_filter:
+                conditions = []
+                for key, value in metadata_filter.items():
+                    conditions.append(
+                        FieldCondition(key=key, match=MatchValue(value=value))
+                    )
+                if conditions:
+                    query_filter = Filter(must=conditions)
+            
+            # Convert dense_vec to list if it's a numpy array
+            dense_vec_list = dense_vec.tolist() if hasattr(dense_vec, 'tolist') else dense_vec
+            
+            # Use query_points with named vector "dense" (collection has both dense and sparse)
+            results = self.qdrantManager.client.query_points(
+                collection_name=self.qdrantManager.collection_name,
+                query=dense_vec_list,
+                using="dense",  # Specify which named vector to use
+                query_filter=query_filter,
+                limit=top_k,
+                with_payload=True
+            )
+            
+            output = []
+            for r in results.points:
+                output.append(r.payload)
+            
+            print(f"   ✅ Dense-only search returned {len(output)} results")
+            return output
+            
+        except Exception as e:
+            print(f"❌ Dense-only search failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return []

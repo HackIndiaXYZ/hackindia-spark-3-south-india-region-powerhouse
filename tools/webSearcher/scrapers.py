@@ -6,7 +6,19 @@ import io
 import re
 import os
 from dotenv import load_dotenv
-import serpapi
+try:
+    from ddgs import DDGS
+except ImportError:
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError:
+        DDGS = None
+
+try:
+    import trafilatura
+except ImportError:
+    trafilatura = None
+
 import concurrent.futures
 try:
     from keybert import KeyBERT
@@ -57,42 +69,148 @@ class BaseScraper(ABC):
             return ""
         return re.sub(r'\s+', ' ', text).strip()
 
+    # Fallback URL mappings for common queries (when SerpAPI quota exhausted)
+    FALLBACK_URLS = {
+        "geeksforgeeks.org": {
+            "binary search": "https://www.geeksforgeeks.org/binary-search/",
+            "data structures": "https://www.geeksforgeeks.org/data-structures/",
+            "algorithms": "https://www.geeksforgeeks.org/fundamentals-of-algorithms/",
+            "programming": "https://www.geeksforgeeks.org/introduction-to-programming-languages/",
+            "control structures": "https://www.geeksforgeeks.org/decision-making-c-cpp/",
+            "arrays": "https://www.geeksforgeeks.org/array-data-structure/",
+            "stacks": "https://www.geeksforgeeks.org/stack-data-structure/",
+            "queues": "https://www.geeksforgeeks.org/queue-data-structure/",
+        },
+        "w3schools.com": {
+            "javascript": "https://www.w3schools.com/js/",
+            "python": "https://www.w3schools.com/python/",
+            "arrays": "https://www.w3schools.com/js/js_arrays.asp",
+        },
+        "wikipedia.org": {
+            "machine learning": "https://en.wikipedia.org/wiki/Machine_learning",
+            "programming": "https://en.wikipedia.org/wiki/Computer_programming",
+        },
+        "docs.python.org": {
+            "python": "https://docs.python.org/3/tutorial/",
+            "list": "https://docs.python.org/3/tutorial/datastructures.html",
+        }
+    }
+    
+    def _get_fallback_url(self, query: str, site_filter: str) -> str:
+        """Try to find a fallback URL from predefined mappings"""
+        if not site_filter:
+            return None
+            
+        query_lower = query.lower()
+        site_mappings = self.FALLBACK_URLS.get(site_filter, {})
+        
+        # Try exact match first
+        if query_lower in site_mappings:
+            return site_mappings[query_lower]
+        
+        # Try partial match
+        for key, url in site_mappings.items():
+            if key in query_lower or query_lower in key:
+                return url
+        
+        return None
+    
     def _resolve_url(self, query: str, site_filter: str = None) -> str:
         """
-        Resolves a search query to a URL using SerpApi.
+        Resolves a search query to a URL using multi-search engine.
+        Priority: Tavily → DuckDuckGo → Google CSE → Fallback URLs
         If query is already a URL, returns it.
+        Returns None if resolution fails.
         """
         # Check if query is a URL
         if re.match(r'^https?://', query):
             return query
 
-        api_key = os.getenv("SERPAPI") or os.getenv("SERPAPI_API_KEY")
-        if not api_key:
-            pass
-            return query
+        # Try Tavily first (best for RAG)
+        tavily_key = os.getenv("TAVILY_API_KEY")
+        if tavily_key:
+            try:
+                from tavily import TavilyClient
+                
+                search_query = query
+                if site_filter:
+                    search_query += f" site:{site_filter}"
+                
+                print(f"🔍 Searching with Tavily: {search_query}")
+                client = TavilyClient(api_key=tavily_key)
+                response = client.search(query=search_query, max_results=1)
+                
+                if response and 'results' in response and len(response['results']) > 0:
+                    url = response['results'][0].get('url')
+                    if url:
+                        print(f"✅ Found URL via Tavily: {url}")
+                        return url
+                
+                print(f"⚠️ Tavily returned no results, trying DuckDuckGo...")
+                
+            except Exception as e:
+                print(f"⚠️ Tavily error: {str(e)}, trying DuckDuckGo...")
+        
+        # Try DuckDuckGo (free, unlimited)
+        if DDGS:
+            try:
+                search_query = query
+                if site_filter:
+                    search_query += f" site:{site_filter}"
+                
+                print(f"🔍 Searching with DuckDuckGo: {search_query}")
+                
+                # Use DuckDuckGo search
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(search_query, max_results=1))
+                
+                if results and len(results) > 0:
+                    url = results[0].get('href') or results[0].get('link')
+                    if url:
+                        print(f"✅ Found URL via DuckDuckGo: {url}")
+                        return url
+                
+                print(f"⚠️ DuckDuckGo returned no results, trying fallback...")
+                
+            except Exception as e:
+                print(f"⚠️ DuckDuckGo error: {str(e)}, trying fallback...")
+        
+        # Try Google CSE (100 queries/day free)
+        google_cse_key = os.getenv("GOOGLE_CSE_API_KEY")
+        google_cse_id = os.getenv("GOOGLE_CSE_ID")
+        if google_cse_key and google_cse_id:
+            try:
+                from googleapiclient.discovery import build
+                
+                search_query = query
+                if site_filter:
+                    search_query += f" site:{site_filter}"
+                
+                print(f"🔍 Searching with Google CSE: {search_query}")
+                service = build("customsearch", "v1", developerKey=google_cse_key)
+                result = service.cse().list(q=search_query, cx=google_cse_id, num=1).execute()
+                
+                if 'items' in result and len(result['items']) > 0:
+                    url = result['items'][0].get('link')
+                    if url:
+                        print(f"✅ Found URL via Google CSE: {url}")
+                        return url
+                
+                print(f"⚠️ Google CSE returned no results, trying fallback...")
+                
+            except Exception as e:
+                print(f"⚠️ Google CSE error: {str(e)}, trying fallback...")
+        
+        # Try fallback URL mapping
+        if site_filter:
+            fallback_url = self._get_fallback_url(query, site_filter)
+            if fallback_url:
+                print(f"✅ Using fallback URL: {fallback_url}")
+                return fallback_url
+        
+        print(f"❌ Could not resolve URL for query: {query}")
+        return None
 
-        try:
-            search_query = query
-            if site_filter:
-                search_query += f" site:{site_filter}"
-            
-            params = {
-                "engine": "google",
-                "q": search_query,
-                "api_key": api_key,
-                "num": 1
-            }
-            
-            results = serpapi.search(params)
-            organic_results = results.get("organic_results", [])
-            
-            if organic_results:
-                return organic_results[0].get("link")
-            
-        except Exception as e:
-            pass
-            
-        return query
 
     def _extract_additional_topics(self, content: str) -> list:
         """Extracts keywords/topics from content using KeyBERT with safe chunking and multi-threading."""
@@ -147,6 +265,32 @@ class BaseScraper(ABC):
             # print(f"KeyBERT extraction failed: {e}") # Keeping clean logs
             return []
 
+    def _get_soup_with_trafilatura(self, url: str) -> tuple:
+        """
+        Get both BeautifulSoup and Trafilatura-extracted content
+        Returns: (soup, clean_text)
+        """
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        # Get HTML
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # Parse with BeautifulSoup
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Extract clean text with Trafilatura (removes ads, nav, etc.)
+        clean_text = ""
+        if trafilatura:
+            try:
+                clean_text = trafilatura.extract(response.text, output_format='txt') or ""
+            except:
+                pass
+        
+        return soup, clean_text
+
 
     def _get_soup(self, url: str) -> BeautifulSoup:
         """Helper to get BeautifulSoup object."""
@@ -166,6 +310,8 @@ class W3SchoolsScraper(BaseScraper):
     def fetch(self, query: str) -> dict:
         try:
             url = self._resolve_url(query, site_filter="w3schools.com")
+            if not url:
+                return {"topic": [], "content": "", "source": "W3Schools", "error": "Could not resolve URL from query"}
             soup = self._get_soup(url)
             
             # Main content area usually in 'w3-main' or 'main'
@@ -208,7 +354,7 @@ class W3SchoolsScraper(BaseScraper):
             # Form topic list
             topics = [topic] if topic else []
             # topics.extend(self._extract_additional_topics(content))
-        
+            print(list(set(topics)))
             return {
                 "topic": list(set(topics)), # Return distinct list
                 "content": content,
@@ -228,6 +374,8 @@ class GeeksForGeeksScraper(BaseScraper):
     def fetch(self, query: str) -> dict:
         try:
             url = self._resolve_url(query, site_filter="geeksforgeeks.org")
+            if not url:
+                return {"topic": [], "content": "", "source": "GeeksForGeeks", "error": "Could not resolve URL from query"}
             soup = self._get_soup(url)
             
             # GFG content structure often changes
@@ -292,6 +440,8 @@ class NPTELScraper(BaseScraper):
     def fetch(self, query: str) -> dict:
         try:
             url = self._resolve_url(query, site_filter="nptel.ac.in")
+            if not url:
+                return {"topic": [], "content": "", "source": "NPTEL", "error": "Could not resolve URL from query"}
             
             # Check if PDF
             if url.lower().endswith('.pdf'):
@@ -318,8 +468,10 @@ class NPTELScraper(BaseScraper):
                     continue
                 extracted_text.append(text)
 
+            final_content = "\n\n".join(extracted_text)
+            
             return {
-                "topic": set[topic],
+                "topic": [topic],
                 # "topic": list(set([topic] + self._extract_additional_topics(final_content))),
                 "content": final_content,
                 "source": "NPTEL"
@@ -346,7 +498,7 @@ class NPTELScraper(BaseScraper):
             final_content = "\n".join(text)
             print("✨ Processing additional topics...")
             return {
-                "topic": set[topic],
+                "topic": [topic],
                 # "topic": list(set([topic] + self._extract_additional_topics(final_content[:5000]))),
                 "content": final_content,
                 "source": source_name
@@ -362,6 +514,8 @@ class MITOCWScraper(BaseScraper):
     def fetch(self, query: str) -> dict:
         try:
             url = self._resolve_url(query, site_filter="ocw.mit.edu")
+            if not url:
+                return {"topic": [], "content": "", "source": "MITOCW", "error": "Could not resolve URL from query"}
             
             # Check for PDF lecture notes
             if url.lower().endswith('.pdf'):
@@ -394,7 +548,7 @@ class MITOCWScraper(BaseScraper):
             final_content = "\n\n".join(content)
             
             return {
-                "topic": set([topic]),
+                "topic": [topic],
                 # "topic": list(set([topic] + self._extract_additional_topics(final_content))),
                 "content": final_content,
                 "source": "MITOCW"
@@ -412,7 +566,7 @@ class MITOCWScraper(BaseScraper):
             topic = reader.metadata.get('/Title', "MIT OCW PDF") if reader.metadata else "MIT OCW PDF"
             text = [p.extract_text() for p in reader.pages]
             final_content = "\n".join(text)
-            return {"topic": set([topic]), "content": final_content, "source": "MITOCW"}
+            return {"topic": [topic], "content": final_content, "source": "MITOCW"}
         except Exception as e:
             return {"topic": [], "content": "", "source": "MITOCW", "error": str(e)}
 
@@ -424,6 +578,8 @@ class OpenStaxScraper(BaseScraper):
     def fetch(self, query: str) -> dict:
         try:
             url = self._resolve_url(query, site_filter="openstax.org")
+            if not url:
+                return {"topic": [], "content": "", "source": "OpenStax", "error": "Could not resolve URL from query"}
             soup = self._get_soup(url)
             
             main_content = soup.find('div', {'data-type': 'page'}) or soup.find('main')
@@ -463,7 +619,7 @@ class OpenStaxScraper(BaseScraper):
             
             final_content = "\n\n".join(extracted)
             return {
-                "topic": set([topic]),
+                "topic": [topic],
                 # "topic": list(set([topic] + self._extract_additional_topics(final_content))),
                 "content": final_content,
                 "source": "OpenStax"
@@ -479,6 +635,8 @@ class UniversityEDUScraper(BaseScraper):
     def fetch(self, query: str) -> dict:
         try:
             url = self._resolve_url(query, site_filter=".edu")
+            if not url:
+                return {"topic": [], "content": "", "source": "UniversityEDU", "error": "Could not resolve URL from query"}
             
             if url.lower().endswith('.pdf'):
                 return self._scrape_pdf(url)
@@ -497,7 +655,7 @@ class UniversityEDUScraper(BaseScraper):
             clean_text = '\n'.join(chunk for chunk in chunks if chunk)
             
             return {
-                "topic": set([topic]),
+                "topic": [topic],
                 # "topic": list(set([topic] + self._extract_additional_topics(clean_text))),
                 "content": clean_text,
                 "source": "UniversityEDU"
@@ -516,6 +674,367 @@ class UniversityEDUScraper(BaseScraper):
             topic = reader.metadata.get('/Title', "University PDF") if reader.metadata else "University PDF"
             text = [p.extract_text() for p in reader.pages]
             final_content = "\n".join(text)
-            return {"topic":set([topic]), "content": final_content, "source": "UniversityEDU"}
+            return {"topic": [topic], "content": final_content, "source": "UniversityEDU"}
         except Exception as e:
             return {"topic": [], "content": "", "source": "UniversityEDU", "error": str(e)}
+
+
+# ============ INDIAN EDUCATIONAL CONTENT SCRAPERS ============
+
+class NCERTScraper(BaseScraper):
+    """
+    Scraper for NCERT official content.
+    Priority scraper for Indian 12th grade syllabus.
+    """
+    def fetch(self, query: str) -> dict:
+        try:
+            url = self._resolve_url(query, site_filter="ncert.nic.in")
+            if not url:
+                return {"topic": [], "content": "", "source": "NCERT", "error": "Could not resolve URL from query"}
+            
+            if url.lower().endswith('.pdf'):
+                return self._fetch_pdf(url, "NCERT")
+            
+            soup = self._get_soup(url)
+            
+            # NCERT pages typically have content in main or article
+            main_content = soup.find('main') or soup.find('article') or soup.find('div', class_='content')
+            
+            if not main_content:
+                main_content = soup.body
+            
+            # Extract topic
+            h1 = soup.find('h1')
+            topic = h1.get_text(strip=True) if h1 else "NCERT Content"
+            
+            # Remove navigation, footer, header
+            for unwanted in main_content.find_all(['nav', 'footer', 'header', 'aside']):
+                unwanted.decompose()
+            
+            # Extract meaningful content
+            extracted = []
+            for element in main_content.find_all(['h2', 'h3', 'p', 'ul', 'ol', 'div']):
+                text = element.get_text(strip=True)
+                if text and len(text) > 20:  # Filter out short/empty elements
+                    if element.name in ['h2', 'h3']:
+                        extracted.append(f"\n### {text}")
+                    elif element.name in ['ul', 'ol']:
+                        for li in element.find_all('li'):
+                            extracted.append(f"- {li.get_text(strip=True)}")
+                    else:
+                        extracted.append(text)
+            
+            final_content = "\n\n".join(extracted)
+            
+            return {
+                "topic": [topic],
+                "content": final_content,
+                "source": "NCERT"
+            }
+        except Exception as e:
+            return {"topic": [], "content": "", "source": "NCERT", "error": str(e)}
+    
+    def _fetch_pdf(self, url: str, source_name: str) -> dict:
+        if not pypdf:
+            return {"topic": ["Unknown PDF"], "content": "pypdf not installed", "source": source_name}
+        
+        try:
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            
+            with io.BytesIO(response.content) as f:
+                reader = pypdf.PdfReader(f)
+                text = []
+                topic = reader.metadata.get('/Title', source_name + " PDF") if reader.metadata else source_name + " PDF"
+                for page in reader.pages:
+                    text.append(page.extract_text())
+            
+            final_content = "\n".join(text)
+            return {
+                "topic": [topic],
+                "content": final_content,
+                "source": source_name
+            }
+        except Exception as e:
+            return {"topic": [], "content": "", "source": source_name, "error": str(e)}
+
+
+class CBSEScraper(BaseScraper):
+    """
+    Scraper for CBSE official content.
+    """
+    def fetch(self, query: str) -> dict:
+        try:
+            url = self._resolve_url(query, site_filter="cbse.gov.in")
+            if not url:
+                return {"topic": [], "content": "", "source": "CBSE", "error": "Could not resolve URL from query"}
+            
+            if url.lower().endswith('.pdf'):
+                return self._fetch_pdf(url, "CBSE")
+            
+            soup = self._get_soup(url)
+            
+            # Extract topic
+            h1 = soup.find('h1')
+            topic = h1.get_text(strip=True) if h1 else "CBSE Content"
+            
+            # Remove unwanted elements
+            for unwanted in soup.find_all(['nav', 'footer', 'header', 'script', 'style']):
+                unwanted.decompose()
+            
+            # Extract content
+            main_content = soup.find('main') or soup.find('article') or soup.body
+            
+            extracted = []
+            for element in main_content.find_all(['h2', 'h3', 'p', 'ul', 'ol']):
+                text = element.get_text(strip=True)
+                if text and len(text) > 15:
+                    extracted.append(text)
+            
+            final_content = "\n\n".join(extracted)
+            
+            return {
+                "topic": [topic],
+                "content": final_content,
+                "source": "CBSE"
+            }
+        except Exception as e:
+            return {"topic": [], "content": "", "source": "CBSE", "error": str(e)}
+    
+    def _fetch_pdf(self, url: str, source_name: str) -> dict:
+        if not pypdf:
+            return {"topic": ["Unknown PDF"], "content": "pypdf not installed", "source": source_name}
+        
+        try:
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            
+            with io.BytesIO(response.content) as f:
+                reader = pypdf.PdfReader(f)
+                text = []
+                topic = reader.metadata.get('/Title', source_name + " PDF") if reader.metadata else source_name + " PDF"
+                for page in reader.pages:
+                    text.append(page.extract_text())
+            
+            final_content = "\n".join(text)
+            return {
+                "topic": [topic],
+                "content": final_content,
+                "source": source_name
+            }
+        except Exception as e:
+            return {"topic": [], "content": "", "source": source_name, "error": str(e)}
+
+
+class DIKSHAScraper(BaseScraper):
+    """
+    Scraper for DIKSHA platform (Government of India).
+    """
+    def fetch(self, query: str) -> dict:
+        try:
+            url = self._resolve_url(query, site_filter="diksha.gov.in")
+            if not url:
+                return {"topic": [], "content": "", "source": "DIKSHA", "error": "Could not resolve URL from query"}
+            soup = self._get_soup(url)
+            
+            # Extract topic
+            h1 = soup.find('h1')
+            topic = h1.get_text(strip=True) if h1 else "DIKSHA Content"
+            
+            # Remove unwanted elements
+            for unwanted in soup.find_all(['nav', 'footer', 'header', 'script', 'style']):
+                unwanted.decompose()
+            
+            # Extract content
+            main_content = soup.find('main') or soup.find('div', class_='content') or soup.body
+            
+            extracted = []
+            for element in main_content.find_all(['h2', 'h3', 'p', 'div']):
+                text = element.get_text(strip=True)
+                if text and len(text) > 20:
+                    extracted.append(text)
+            
+            final_content = "\n\n".join(extracted)
+            
+            return {
+                "topic": [topic],
+                "content": final_content,
+                "source": "DIKSHA"
+            }
+        except Exception as e:
+            return {"topic": [], "content": "", "source": "DIKSHA", "error": str(e)}
+
+
+class NROERScraper(BaseScraper):
+    """
+    Scraper for NROER (National Repository of Open Educational Resources).
+    """
+    def fetch(self, query: str) -> dict:
+        try:
+            url = self._resolve_url(query, site_filter="nroer.gov.in")
+            if not url:
+                return {"topic": [], "content": "", "source": "NROER", "error": "Could not resolve URL from query"}
+            soup = self._get_soup(url)
+            
+            # Extract topic
+            h1 = soup.find('h1')
+            topic = h1.get_text(strip=True) if h1 else "NROER Content"
+            
+            # Remove unwanted elements
+            for unwanted in soup.find_all(['nav', 'footer', 'header', 'script', 'style']):
+                unwanted.decompose()
+            
+            # Extract content
+            main_content = soup.find('main') or soup.find('article') or soup.body
+            
+            extracted = []
+            for element in main_content.find_all(['h2', 'h3', 'p', 'ul', 'ol']):
+                text = element.get_text(strip=True)
+                if text and len(text) > 15:
+                    extracted.append(text)
+            
+            final_content = "\n\n".join(extracted)
+            
+            return {
+                "topic": [topic],
+                "content": final_content,
+                "source": "NROER"
+            }
+        except Exception as e:
+            return {"topic": [], "content": "", "source": "NROER", "error": str(e)}
+
+
+# ============ OFFICIAL DOCUMENTATION SCRAPERS ============
+
+class OfficialDocsScraper(BaseScraper):
+    """
+    Generic scraper for official documentation sites.
+    Supports: docs.python.org, pytorch.org/docs, tensorflow.org, 
+    developer.mozilla.org, kubernetes.io/docs, etc.
+    """
+    def fetch(self, query: str) -> dict:
+        try:
+            # Determine site filter based on query
+            site_filter = None
+            source_name = "Official Docs"
+            
+            if "python" in query.lower():
+                site_filter = "docs.python.org"
+                source_name = "Python Docs"
+            elif "pytorch" in query.lower():
+                site_filter = "pytorch.org"
+                source_name = "PyTorch Docs"
+            elif "tensorflow" in query.lower():
+                site_filter = "tensorflow.org"
+                source_name = "TensorFlow Docs"
+            elif "javascript" in query.lower() or "mdn" in query.lower():
+                site_filter = "developer.mozilla.org"
+                source_name = "MDN"
+            elif "kubernetes" in query.lower():
+                site_filter = "kubernetes.io"
+                source_name = "Kubernetes Docs"
+            
+            url = self._resolve_url(query, site_filter=site_filter)
+            if not url:
+                return {"topic": [], "content": "", "source": source_name, "error": "Could not resolve URL from query"}
+            soup = self._get_soup(url)
+            
+            # Extract topic
+            h1 = soup.find('h1')
+            topic = h1.get_text(strip=True) if h1 else source_name
+            
+            # Find main content
+            main_content = (soup.find('main') or 
+                          soup.find('article') or 
+                          soup.find('div', class_='document') or
+                          soup.find('div', class_='content'))
+            
+            if not main_content:
+                main_content = soup.body
+            
+            # Remove navigation, sidebar, footer
+            for unwanted in main_content.find_all(['nav', 'footer', 'header', 'aside', 'script', 'style']):
+                unwanted.decompose()
+            
+            # Extract structured content
+            extracted = []
+            for element in main_content.find_all(['h2', 'h3', 'p', 'pre', 'code', 'ul', 'ol']):
+                text = element.get_text(strip=True)
+                if not text or len(text) < 10:
+                    continue
+                
+                if element.name in ['h2', 'h3']:
+                    extracted.append(f"\n### {text}")
+                elif element.name in ['pre', 'code']:
+                    extracted.append(f"```\n{text}\n```")
+                elif element.name in ['ul', 'ol']:
+                    for li in element.find_all('li'):
+                        extracted.append(f"- {li.get_text(strip=True)}")
+                else:
+                    extracted.append(text)
+            
+            final_content = "\n\n".join(extracted)
+            
+            return {
+                "topic": [topic],
+                "content": final_content,
+                "source": source_name
+            }
+        except Exception as e:
+            return {"topic": [], "content": "", "source": "Official Docs", "error": str(e)}
+
+
+class WikipediaScraper(BaseScraper):
+    """
+    Scraper for Wikipedia content.
+    Good for definitions, history, and fundamental concepts.
+    """
+    def fetch(self, query: str) -> dict:
+        try:
+            url = self._resolve_url(query, site_filter="wikipedia.org")
+            if not url:
+                return {"topic": [], "content": "", "source": "Wikipedia", "error": "Could not resolve URL from query"}
+            soup = self._get_soup(url)
+            
+            # Extract topic from title
+            h1 = soup.find('h1', class_='firstHeading')
+            topic = h1.get_text(strip=True) if h1 else "Wikipedia Article"
+            
+            # Find main content
+            content_div = soup.find('div', id='mw-content-text')
+            
+            if not content_div:
+                return {"topic": [], "content": "", "source": "Wikipedia", "error": "Content not found"}
+            
+            # Remove unwanted elements
+            for unwanted in content_div.find_all(['table', 'div'], class_=['infobox', 'navbox', 'metadata', 'reflist']):
+                unwanted.decompose()
+            for unwanted in content_div.find_all(['sup', 'style', 'script']):
+                unwanted.decompose()
+            
+            # Extract paragraphs and headings
+            extracted = []
+            for element in content_div.find_all(['h2', 'h3', 'p'], limit=50):
+                text = element.get_text(strip=True)
+                if not text or len(text) < 20:
+                    continue
+                
+                # Stop at "See also" or "References" sections
+                if element.name in ['h2', 'h3'] and any(x in text for x in ['See also', 'References', 'External links']):
+                    break
+                
+                if element.name in ['h2', 'h3']:
+                    extracted.append(f"\n### {text}")
+                else:
+                    extracted.append(text)
+            
+            final_content = "\n\n".join(extracted)
+            
+            return {
+                "topic": [topic],
+                "content": final_content,
+                "source": "Wikipedia"
+            }
+        except Exception as e:
+            return {"topic": [], "content": "", "source": "Wikipedia", "error": str(e)}
+
